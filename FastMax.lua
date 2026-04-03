@@ -1,5 +1,3 @@
--- ts file was generated at discord.gg/25ms
-
 local v1 = next
 local v2 = {
     game.ReplicatedStorage.Util,
