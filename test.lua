@@ -4,14 +4,15 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local plr = Players.LocalPlayer
 local enemiesFolder = workspace:WaitForChild("Enemies")
 
-local ATTACK_RANGE                = 650
-local SEARCH_RADIUS               = 2500
-local MAX_HIT_TARGETS             = 20
-local PLAYER_AUTO_ATTACK_DISTANCE = 9999  
-local MOB_AUTO_ATTACK_DISTANCE    = 200
-local AIM_PREDICTION_FACTOR       = 0.12  
-
-local DEBUG = true  
+local CONFIG = {
+    ATTACK_RANGE = 650,
+    SEARCH_RADIUS = 2500,
+    MAX_HIT_TARGETS = 20,
+    PLAYER_AUTO_ATTACK_DISTANCE = 9999,
+    MOB_AUTO_ATTACK_DISTANCE = 200,
+    AIM_PREDICTION_FACTOR = 0.12,
+    DEBUG = true,
+}  
 
 local Net, registerHit, registerAttack
 pcall(function()
@@ -21,7 +22,7 @@ pcall(function()
 end)
 
 local function dbg(...)
-    if DEBUG then print("[AutoAtk]", ...) end
+    if CONFIG.DEBUG then print("[AutoAtk]", ...) end
 end
 
 local function getRoot(model)
@@ -50,14 +51,23 @@ local function getPredictedPosition(targetRoot)
     local prev = prevPositions[targetRoot]
     prevPositions[targetRoot] = { pos = cur, t = now }
 
+    -- Cleanup old entries to prevent memory leak
+    for key, val in pairs(prevPositions) do
+        if now - val.t > 5 then
+            prevPositions[key] = nil
+        end
+    end
+
     if prev and (now - prev.t) > 0 and (now - prev.t) < 0.5 then
         local vel = (cur - prev.pos) / (now - prev.t)
-        return cur + vel * AIM_PREDICTION_FACTOR
+        return cur + vel * CONFIG.AIM_PREDICTION_FACTOR
     end
 
     local ok, vel = pcall(function() return targetRoot.AssemblyLinearVelocity end)
     if ok and vel and vel.Magnitude > 0 then
-        return cur + vel * AIM_PREDICTION_FACTOR
+        -- Scale prediction by velocity magnitude
+        local scaleFactor = math.min(vel.Magnitude / 100, 1) * CONFIG.AIM_PREDICTION_FACTOR
+        return cur + vel * scaleFactor
     end
 
     return cur
@@ -66,7 +76,7 @@ end
 local function dir(origin, targetPos)
     local v = targetPos - origin
     if v.Magnitude == 0 then return nil end
-    return v.Magnitude > ATTACK_RANGE and (v.Unit * ATTACK_RANGE) or v
+    return v.Magnitude > CONFIG.ATTACK_RANGE and (v.Unit * CONFIG.ATTACK_RANGE) or v
 end
 
 local function getRemote()
@@ -102,7 +112,7 @@ end
 local function isPvPEnabled(player)
     if not player then return false end
     local ok, val = pcall(function() return player:GetAttribute("PvpDisabled") end)
-    if not ok then return true end  -- không đọc được → assume bật
+    if not ok then return true end  
     return val ~= true
 end
 
@@ -162,8 +172,8 @@ local function gatherTargets(root)
     local function push(model, targetRoot, kind, priority)
         if not model or not targetRoot then return end
         local distance = (targetRoot.Position - root.Position).Magnitude
-        if distance > SEARCH_RADIUS then return end
-        if kind == "mob" and distance > MOB_AUTO_ATTACK_DISTANCE then return end
+        if distance > CONFIG.SEARCH_RADIUS then return end
+        if kind == "mob" and distance > CONFIG.MOB_AUTO_ATTACK_DISTANCE then return end
 
         table.insert(targets, {
             model    = model,
@@ -197,7 +207,6 @@ local function gatherTargets(root)
         end
     end
 
-    -- Sort: priority thấp → ưu tiên cao; cùng priority → gần hơn trước
     table.sort(targets, function(a, b)
         if a.priority ~= b.priority then return a.priority < b.priority end
         return a.distance < b.distance
@@ -225,9 +234,9 @@ local function canKeepCurrentTarget(root, entry)
     if not root or not isValidTargetEntry(entry) then return false end
 
     if entry.kind == "player" then
-        return getTargetDistance(root, entry.root) <= SEARCH_RADIUS
+        return getTargetDistance(root, entry.root) <= CONFIG.SEARCH_RADIUS
     end
-    return getTargetDistance(root, entry.root) <= MOB_AUTO_ATTACK_DISTANCE
+    return getTargetDistance(root, entry.root) <= CONFIG.MOB_AUTO_ATTACK_DISTANCE
 end
 
 local function getLockedTarget(root, targets)
@@ -254,7 +263,7 @@ end
 local function shouldAttackNow(root, entry)
     if not entry then return false end
     if entry.kind == "player" then return true end
-    return getTargetDistance(root, entry.root) <= MOB_AUTO_ATTACK_DISTANCE
+    return getTargetDistance(root, entry.root) <= CONFIG.MOB_AUTO_ATTACK_DISTANCE
 end
 
 local function buildHitList(targets, primaryEntry)
@@ -267,7 +276,7 @@ local function buildHitList(targets, primaryEntry)
     end
 
     for i = 1, #targets do
-        if #hitData >= MAX_HIT_TARGETS then break end
+        if #hitData >= CONFIG.MAX_HIT_TARGETS then break end
         local e = targets[i]
         if not seen[e.model] and isValidTargetEntry(e) and e.kind == "player" then
             hitData[#hitData + 1] = { e.model, e.root }
@@ -276,10 +285,10 @@ local function buildHitList(targets, primaryEntry)
     end
 
     for i = 1, #targets do
-        if #hitData >= MAX_HIT_TARGETS then break end
+        if #hitData >= CONFIG.MAX_HIT_TARGETS then break end
         local e = targets[i]
         if not seen[e.model] and isValidTargetEntry(e)
-            and e.kind == "mob" and e.distance <= MOB_AUTO_ATTACK_DISTANCE
+            and e.kind == "mob" and e.distance <= CONFIG.MOB_AUTO_ATTACK_DISTANCE
         then
             hitData[#hitData + 1] = { e.model, e.root }
             seen[e.model] = true
@@ -301,10 +310,15 @@ end
 local sharedTargets  = {}
 local sharedPrimary  = nil
 local _lastDebugTick = 0
+local lastAttackTime = 0
+local ATTACK_COOLDOWN = 0.1  -- 100ms
 
 task.spawn(function()
     while task.wait(0.03) do
         pcall(function()
+            local now = tick()
+            if now - lastAttackTime < ATTACK_COOLDOWN then return end
+
             local root   = hrp()
             local remote = getRemote()
 
@@ -348,6 +362,7 @@ task.spawn(function()
 
             if shouldAttackNow(root, sharedPrimary) then
                 fireAt(remote, root.Position, sharedPrimary.root, sharedPrimary.kind == "player")
+                lastAttackTime = now
             end
         end)
     end
@@ -380,6 +395,19 @@ task.spawn(function()
                         fireAt(remote, root.Position, extraRoot, isP)
                     end
                 end
+            end
+        end)
+    end
+end)
+
+-- Periodic target validation to prevent locking on distant targets
+task.spawn(function()
+    while task.wait(0.5) do
+        pcall(function()
+            local root = hrp()
+            if root and currentTargetModel and sharedPrimary and not canKeepCurrentTarget(root, sharedPrimary) then
+                currentTargetModel = nil
+                sharedPrimary = nil
             end
         end)
     end
@@ -419,7 +447,7 @@ task.spawn(function()
 
             local root = hrp()
             local hasPrimary = sharedPrimary and isValidTargetEntry(sharedPrimary) and root
-                and (sharedPrimary.root.Position - root.Position).Magnitude <= SEARCH_RADIUS
+                and (sharedPrimary.root.Position - root.Position).Magnitude <= CONFIG.SEARCH_RADIUS
 
             if not hasPrimary then
                 ctrl.active    = false
